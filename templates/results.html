@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prediction Results - Failure Prediction Dashboard</title>
+    
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css" rel="stylesheet">
+    
+    <style>
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            padding-bottom: 3rem;
+        }
+        
+        .results-container {
+            padding: 2rem 0;
+        }
+        
+        .card {
+            border: none;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            margin-bottom: 2rem;
+        }
+        
+        .stat-box {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 1.5rem;
+            border-radius: 10px;
+            text-align: center;
+        }
+        
+        .stat-box h3 {
+            font-size: 2rem;
+            margin: 0;
+        }
+        
+        .stat-box p {
+            margin: 0;
+            opacity: 0.9;
+        }
+        
+        .navbar {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        .navbar-brand {
+            font-weight: bold;
+            color: #667eea;
+        }
+        
+        .table-wrapper {
+            max-height: 600px;
+            overflow-y: auto;
+        }
+        
+        .risk-badge {
+            padding: 0.5rem 1rem;
+            border-radius: 20px;
+            font-weight: bold;
+        }
+        
+        .risk-high {
+            background-color: #dc3545;
+            color: white;
+        }
+        
+        .risk-medium {
+            background-color: #ffc107;
+            color: black;
+        }
+        
+        .risk-low {
+            background-color: #28a745;
+            color: white;
+        }
+        
+        .btn-custom {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border: none;
+            color: white;
+            padding: 0.6rem 1.5rem;
+            border-radius: 50px;
+            transition: all 0.3s ease;
+        }
+        
+        .btn-custom:hover {
+            transform: scale(1.05);
+            color: white;
+        }
+        
+        .table thead {
+            position: sticky;
+            top: 0;
+            background-color: #667eea;
+            color: white;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-light sticky-top">
+        <div class="container">
+            <a class="navbar-brand" href="/">
+                🛰️ US Space Command - Facility Dashboard
+            </a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav ms-auto">
+                    <li class="nav-item">
+                        <a class="nav-link" href="/">Dashboard</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/upload">Upload Data</a>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container results-container">
+        <div class="row">
+            <div class="col-12 text-center text-white mb-4">
+                <h1 class="display-5 fw-bold">Prediction Results</h1>
+                <p class="lead">Analysis of {{ filename }}</p>
+            </div>
+        </div>
+
+        <!-- Summary Statistics -->
+        <div class="row g-3 mb-4">
+            <div class="col-md-3">
+                <div class="stat-box">
+                    <h3>{{ summary.total_facilities }}</h3>
+                    <p>Facilities Analyzed</p>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-box" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
+                    <h3>{{ summary.high_risk }}</h3>
+                    <p>High Risk</p>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-box" style="background: linear-gradient(135deg, #ffc107 0%, #ff8c00 100%);">
+                    <h3>{{ summary.medium_risk }}</h3>
+                    <p>Medium Risk</p>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-box" style="background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);">
+                    <h3>{{ summary.low_risk }}</h3>
+                    <p>Low Risk</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Additional Stats -->
+        <div class="row mb-4">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-body text-center">
+                        <h5>Average Failure Probability</h5>
+                        <h2 class="text-primary">{{ "%.1f"|format(summary.avg_failure_probability) }}%</h2>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-body text-center">
+                        <h5>Total Estimated Replacement Cost</h5>
+                        <h2 class="text-danger">${{ "{:,.0f}".format(summary.total_estimated_cost) }}</h2>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Results Table -->
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h4 class="mb-0">Detailed Predictions</h4>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-wrapper">
+                    <table class="table table-striped table-hover mb-0">
+                        <thead>
+                            <tr>
+                                <th>Facility ID</th>
+                                <th>Type</th>
+                                <th>Current Condition</th>
+                                <th>Predicted Condition</th>
+                                <th>Failure Probability</th>
+                                <th>Predicted Failure Date</th>
+                                <th>Years Until Failure</th>
+                                <th>Risk Level</th>
+                                <th>Estimated Cost</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for row in results %}
+                            <tr>
+                                <td><strong>{{ row.facility_id or row['Unique Identifier'] }}</strong></td>
+                                <td>{{ row.Type or row.Title or 'N/A' }}</td>
+                                <td>
+                                    <span class="badge bg-secondary">
+                                        {{ "%.0f"|format(row['Condition Index']) if row['Condition Index'] else 'N/A' }}
+                                    </span>
+                                </td>
+                                <td>
+                                    <span class="badge bg-info">
+                                        {{ "%.1f"|format(row.Predicted_Condition_Index) }}
+                                    </span>
+                                </td>
+                                <td>
+                                    <span class="badge {% if row.Failure_Probability > 60 %}bg-danger{% elif row.Failure_Probability > 30 %}bg-warning{% else %}bg-success{% endif %}">
+                                        {{ "%.1f"|format(row.Failure_Probability) }}%
+                                    </span>
+                                </td>
+                                <td>{{ row.Predicted_Failure_Date[:10] if row.Predicted_Failure_Date else 'N/A' }}</td>
+                                <td>{{ "%.1f"|format(row.Years_Until_Failure) }}</td>
+                                <td>
+                                    <span class="risk-badge risk-{{ row.Risk_Level|lower }}">
+                                        {{ row.Risk_Level }}
+                                    </span>
+                                </td>
+                                <td>${{ "{:,.0f}".format(row.Estimated_Replacement_Cost) }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="row mt-4">
+            <div class="col-12 text-center">
+                <button class="btn btn-custom btn-lg me-2" onclick="window.print()">
+                    🖨️ Print Report
+                </button>
+                <a href="/upload" class="btn btn-outline-light btn-lg me-2">
+                    📤 Upload Another File
+                </a>
+                <a href="/" class="btn btn-outline-light btn-lg">
+                    🏠 Back to Dashboard
+                </a>
+            </div>
+        </div>
+
+        <!-- Recommendations -->
+        <div class="row mt-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header bg-warning">
+                        <h4 class="mb-0">⚠️ Recommended Actions</h4>
+                    </div>
+                    <div class="card-body">
+                        <h5>High Priority Facilities ({{ summary.high_risk }} facilities)</h5>
+                        <ul>
+                            <li>Schedule immediate inspections for all high-risk facilities</li>
+                            <li>Allocate emergency maintenance budget</li>
+                            <li>Consider temporary operational adjustments</li>
+                        </ul>
+                        
+                        <h5 class="mt-4">Medium Priority Facilities ({{ summary.medium_risk }} facilities)</h5>
+                        <ul>
+                            <li>Plan preventive maintenance within next 6 months</li>
+                            <li>Monitor condition indicators monthly</li>
+                            <li>Budget for potential replacements in next fiscal year</li>
+                        </ul>
+                        
+                        <h5 class="mt-4">Budget Planning</h5>
+                        <p>
+                            Based on current predictions, estimated total replacement cost for all facilities 
+                            is <strong>${{ "{:,.0f}".format(summary.total_estimated_cost) }}</strong>. 
+                            We recommend budgeting at least 20% of this amount annually for preventive maintenance 
+                            to avoid catastrophic failures.
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

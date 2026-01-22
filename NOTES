@@ -1,0 +1,14 @@
+# 1. Navigate to project directory (if not already there)
+cd "C:\Users\Dawson\Desktop\Prediction Dashboard"
+
+# 2. Activate virtual environment
+venv\Scripts\activate
+
+# 3. Phase 1: Prepare data
+py src\data_prep.py
+
+# 4. Phase 2: Train models (wait for this to complete)
+py src\train_model.py
+
+# 5. Phase 3: Start the dashboard
+py app.py

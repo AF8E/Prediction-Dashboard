@@ -11,6 +11,17 @@ ENV/
 dist/
 build/
 
+# Application-specific
+uploads/
+models/*.pkl
+models/*.csv
+models/*.json
+data/*.csv
+data/*.xlsx
+data/*.xls
+!data/generated_facility_data.xlsx
+!data/Simulated_Data.xlsx
+
 # Node
 node_modules/
 .next/
@@ -23,6 +34,7 @@ yarn-error.log*
 # IDE
 .vscode/
 .idea/
+.vs/
 *.swp
 *.swo
 *~
@@ -34,4 +46,11 @@ Thumbs.db
 # Environment
 .env
 .env.local
+.env.*.local
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
 
