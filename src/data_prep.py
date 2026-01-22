@@ -32,7 +32,7 @@ class FacilityDataETL:
         self.master_data = None
         
     def load_inventory(self):
-        """Load and process facility inventory data"""
+        """Load and process facility inventory data with hierarchical structure"""
         print("Loading facility inventory...")
         
         # Load Facility Condition Index sheet
@@ -47,7 +47,86 @@ class FacilityDataETL:
             sheet_name='System Condition Index'
         )
         
+        print(f"  Loaded {len(facility_df)} facilities and {len(systems_df)} systems")
+        
         return facility_df, systems_df
+    
+    def group_systems_by_facility(self, systems_df, facility_df):
+        """
+        Group systems by their parent facility
+        
+        Args:
+            systems_df: System condition dataframe
+            facility_df: Facility condition dataframe
+            
+        Returns:
+            Dictionary mapping facility_id to list of systems
+        """
+        print("Grouping systems by facility...")
+        
+        # Identify facility ID column in systems
+        facility_id_col = None
+        for col in ['Facility Number', 'Facility ID', 'Parent Facility', 'Facility', 'Unique Identifier']:
+            if col in systems_df.columns:
+                facility_id_col = col
+                break
+        
+        # If no explicit facility column, try to infer from system ID pattern
+        if facility_id_col is None:
+            # Check if system IDs follow pattern that can be mapped to facilities
+            system_id_col = None
+            for col in ['Unique Identifier', 'System ID', 'ID']:
+                if col in systems_df.columns:
+                    system_id_col = col
+                    break
+            
+            if system_id_col:
+                # Try to extract facility number from system ID (e.g., SYS-001 -> Facility #1)
+                # This is a heuristic - adjust based on actual data structure
+                systems_df['_inferred_facility'] = systems_df[system_id_col].apply(
+                    lambda x: self._extract_facility_from_system_id(x)
+                )
+                facility_id_col = '_inferred_facility'
+        
+        # If still no facility mapping, create default grouping
+        if facility_id_col is None:
+            print("  WARNING: Could not identify facility grouping. Using default mapping.")
+            # Group systems sequentially (e.g., 15 systems per facility)
+            systems_per_facility = 15
+            systems_df['_grouped_facility'] = (systems_df.index // systems_per_facility).apply(
+                lambda x: f"FAC-{x+1:03d}"
+            )
+            facility_id_col = '_grouped_facility'
+        
+        # Group systems by facility
+        facility_systems = {}
+        for facility_id, group in systems_df.groupby(facility_id_col):
+            facility_systems[facility_id] = group.to_dict('records')
+        
+        print(f"  Grouped {len(systems_df)} systems into {len(facility_systems)} facilities")
+        
+        return facility_systems, facility_id_col
+    
+    def _extract_facility_from_system_id(self, system_id):
+        """Extract facility number from system ID (heuristic)"""
+        if pd.isna(system_id):
+            return None
+        
+        system_id_str = str(system_id)
+        # Try patterns like SYS-001 -> Facility #1, or Facility1-SYS-001 -> Facility1
+        match = re.search(r'Facility\s*#?(\d+)', system_id_str, re.IGNORECASE)
+        if match:
+            return f"FAC-{int(match.group(1)):03d}"
+        
+        # Try to extract number and map to facility
+        match = re.search(r'(\d+)', system_id_str)
+        if match:
+            # Assume systems 1-15 belong to Facility 1, 16-30 to Facility 2, etc.
+            sys_num = int(match.group(1))
+            facility_num = ((sys_num - 1) // 15) + 1
+            return f"FAC-{facility_num:03d}"
+        
+        return None
     
     def load_work_orders(self):
         """Load work order failure history"""
@@ -354,7 +433,9 @@ class FacilityDataETL:
     
     def merge_inventory_and_failures(self, facility_df, systems_df, wo_df, synthetic_df):
         """
-        Merge all datasets into master training data
+        Merge all datasets into master training data with hierarchical structure
+        
+        Creates both facility-level and system-level rows with 'level' column
         
         Args:
             facility_df: Facility inventory
@@ -363,9 +444,9 @@ class FacilityDataETL:
             synthetic_df: Synthetic failures
             
         Returns:
-            Merged master dataframe
+            Merged master dataframe with 'level' column (facility/system)
         """
-        print("Merging datasets...")
+        print("Merging datasets with hierarchical structure...")
         
         # Combine real and synthetic failures
         all_failures = pd.concat([
@@ -373,66 +454,199 @@ class FacilityDataETL:
             synthetic_df
         ], ignore_index=True)
         
-        # Aggregate failures by facility
-        failure_summary = all_failures.groupby('facility_id').agg({
+        # Group systems by facility
+        facility_systems_dict, facility_id_col = self.group_systems_by_facility(systems_df, facility_df)
+        
+        # Standardize facility ID in facility_df
+        if 'Unique Identifier' in facility_df.columns:
+            facility_df = facility_df.rename(columns={'Unique Identifier': 'facility_id'})
+        elif 'facility_id' not in facility_df.columns:
+            # Try to find facility ID column
+            for col in ['Facility Number', 'Facility ID', 'ID']:
+                if col in facility_df.columns:
+                    facility_df = facility_df.rename(columns={col: 'facility_id'})
+                    break
+        
+        # Prepare systems_df with facility_id
+        systems_processed = systems_df.copy()
+        if facility_id_col and facility_id_col in systems_processed.columns:
+            systems_processed['facility_id'] = systems_processed[facility_id_col]
+        elif '_inferred_facility' in systems_processed.columns:
+            systems_processed['facility_id'] = systems_processed['_inferred_facility']
+        elif '_grouped_facility' in systems_processed.columns:
+            systems_processed['facility_id'] = systems_processed['_grouped_facility']
+        else:
+            # Default: assign systems to facilities sequentially
+            num_facilities = len(facility_df)
+            systems_per_fac = len(systems_processed) // max(num_facilities, 1)
+            facility_ids = []
+            for i in range(len(systems_processed)):
+                fac_idx = min(i // max(systems_per_fac, 1), num_facilities - 1)
+                if 'facility_id' in facility_df.columns:
+                    facility_ids.append(facility_df.iloc[fac_idx]['facility_id'])
+                else:
+                    facility_ids.append(f"FAC-{fac_idx+1:03d}")
+            systems_processed['facility_id'] = facility_ids
+        
+        # Get system ID column
+        system_id_col = None
+        for col in ['Unique Identifier', 'System ID', 'ID']:
+            if col in systems_processed.columns:
+                system_id_col = col
+                break
+        
+        if system_id_col:
+            systems_processed = systems_processed.rename(columns={system_id_col: 'entity_id'})
+        else:
+            systems_processed['entity_id'] = systems_processed.index.map(lambda x: f"SYS-{x+1:03d}")
+        
+        # Aggregate failures by facility and by system
+        # Facility-level failures
+        facility_failures = all_failures.groupby('facility_id').agg({
             'occurred_date': ['count', 'min', 'max'],
             'failure_type': lambda x: x.mode()[0] if len(x) > 0 else 'none'
         }).reset_index()
+        facility_failures.columns = ['facility_id', 'total_failures', 'first_failure_date', 
+                                     'last_failure_date', 'most_common_failure']
         
-        failure_summary.columns = ['facility_id', 'total_failures', 'first_failure_date', 
-                                   'last_failure_date', 'most_common_failure']
-        
-        # Calculate time between failures
-        failure_summary['days_between_failures'] = (
-            (failure_summary['last_failure_date'] - failure_summary['first_failure_date']).dt.days / 
-            failure_summary['total_failures'].clip(lower=1)
-        )
-        
-        # Merge with facility inventory
-        master = facility_df.copy()
-        
-        # Standardize facility ID column
-        if 'Unique Identifier' in master.columns:
-            master.rename(columns={'Unique Identifier': 'facility_id'}, inplace=True)
-        
-        # Merge failure data
-        master = master.merge(failure_summary, on='facility_id', how='left')
-        
-        # Fill missing values
-        master['total_failures'] = master['total_failures'].fillna(0)
-        master['most_common_failure'] = master['most_common_failure'].fillna('none')
-        
-        # Add system-level features
-        if 'facility_id' in systems_df.columns or 'Unique Identifier' in systems_df.columns:
-            systems_agg = systems_df.groupby(
-                systems_df.columns[0]  # First column is usually the ID
-            ).agg({
-                'Condition Index': ['mean', 'min', 'std'],
-                'Life Expectancy': 'mean'
+        # System-level failures (if we have system IDs in failures)
+        system_failures = pd.DataFrame()
+        if 'system_id' in all_failures.columns or 'entity_id' in all_failures.columns:
+            sys_id_col = 'system_id' if 'system_id' in all_failures.columns else 'entity_id'
+            system_failures = all_failures.groupby(sys_id_col).agg({
+                'occurred_date': ['count', 'min', 'max'],
+                'failure_type': lambda x: x.mode()[0] if len(x) > 0 else 'none'
             }).reset_index()
+            system_failures.columns = [sys_id_col, 'total_failures', 'first_failure_date',
+                                      'last_failure_date', 'most_common_failure']
+        
+        # Create facility-level rows
+        facility_rows = []
+        for _, facility in facility_df.iterrows():
+            fac_id = facility.get('facility_id', facility.get('Unique Identifier', f"FAC-{len(facility_rows)+1:03d}"))
             
-            systems_agg.columns = ['facility_id', 'avg_system_condition', 'min_system_condition',
-                                   'system_condition_std', 'avg_system_life_expectancy']
+            # Get systems for this facility
+            facility_systems = systems_processed[systems_processed['facility_id'] == fac_id]
             
-            master = master.merge(systems_agg, on='facility_id', how='left')
+            # Aggregate facility metrics from systems
+            if len(facility_systems) > 0:
+                # Weighted average condition (by life expectancy)
+                if 'Condition Index' in facility_systems.columns and 'Life Expectancy' in facility_systems.columns:
+                    weights = facility_systems['Life Expectancy'].fillna(50)
+                    facility_condition = (facility_systems['Condition Index'] * weights).sum() / weights.sum()
+                elif 'Condition Index' in facility_systems.columns:
+                    facility_condition = facility_systems['Condition Index'].mean()
+                else:
+                    facility_condition = facility.get('Condition Index', 65)
+                
+                facility_age = facility_systems['Age (years)'].max() if 'Age (years)' in facility_systems.columns else facility.get('Age (years)', 20)
+                facility_life_expectancy = facility_systems['Life Expectancy'].mean() if 'Life Expectancy' in facility_systems.columns else facility.get('Life Expectancy', 50)
+            else:
+                facility_condition = facility.get('Condition Index', 65)
+                facility_age = facility.get('Age (years)', 20)
+                facility_life_expectancy = facility.get('Life Expectancy', 50)
+            
+            # Merge facility failures
+            fac_failures = facility_failures[facility_failures['facility_id'] == fac_id]
+            if len(fac_failures) > 0:
+                total_failures = int(fac_failures.iloc[0]['total_failures'])
+                first_failure = fac_failures.iloc[0]['first_failure_date']
+                last_failure = fac_failures.iloc[0]['last_failure_date']
+                most_common = fac_failures.iloc[0]['most_common_failure']
+            else:
+                total_failures = 0
+                first_failure = pd.NaT
+                last_failure = pd.NaT
+                most_common = 'none'
+            
+            days_between = ((last_failure - first_failure).days / total_failures) if total_failures > 0 and pd.notna(last_failure) and pd.notna(first_failure) else 365
+            
+            facility_row = {
+                'level': 'facility',
+                'parent_id': None,
+                'entity_id': fac_id,
+                'facility_id': fac_id,
+                'Type': facility.get('Type', 'Facility'),
+                'Title': facility.get('Title', facility.get('Name', fac_id)),
+                'Condition Index': round(facility_condition, 1),
+                'Age (years)': facility_age,
+                'Life Expectancy': facility_life_expectancy,
+                'total_failures': total_failures,
+                'first_failure_date': first_failure,
+                'last_failure_date': last_failure,
+                'most_common_failure': most_common,
+                'days_between_failures': days_between
+            }
+            
+            # Add other facility columns
+            for col in facility.index:
+                if col not in facility_row:
+                    facility_row[col] = facility[col]
+            
+            facility_rows.append(facility_row)
         
-        # Calculate derived features
-        # Handle failure_rate calculation
-        if 'Age (years)' in master.columns:
-            master['failure_rate'] = master['total_failures'] / master['Age (years)'].clip(lower=1)
-        else:
-            master['failure_rate'] = master['total_failures'] / 1
+        # Create system-level rows
+        system_rows = []
+        for _, system in systems_processed.iterrows():
+            sys_id = system.get('entity_id', f"SYS-{len(system_rows)+1:03d}")
+            fac_id = system.get('facility_id', None)
+            
+            # Get system failures
+            sys_failures = system_failures[system_failures.get('entity_id', system_failures.columns[0]) == sys_id] if len(system_failures) > 0 else pd.DataFrame()
+            if len(sys_failures) > 0:
+                total_failures = int(sys_failures.iloc[0]['total_failures'])
+                first_failure = sys_failures.iloc[0]['first_failure_date']
+                last_failure = sys_failures.iloc[0]['last_failure_date']
+                most_common = sys_failures.iloc[0]['most_common_failure']
+            else:
+                # Use facility-level failures as fallback
+                if fac_id:
+                    fac_failures = facility_failures[facility_failures['facility_id'] == fac_id]
+                    if len(fac_failures) > 0:
+                        total_failures = int(fac_failures.iloc[0]['total_failures'] // len(systems_processed[systems_processed['facility_id'] == fac_id]))
+                    else:
+                        total_failures = 0
+                else:
+                    total_failures = 0
+                first_failure = pd.NaT
+                last_failure = pd.NaT
+                most_common = 'none'
+            
+            days_between = ((last_failure - first_failure).days / total_failures) if total_failures > 0 and pd.notna(last_failure) and pd.notna(first_failure) else 365
+            
+            system_row = {
+                'level': 'system',
+                'parent_id': fac_id,
+                'entity_id': sys_id,
+                'facility_id': fac_id,
+                'Type': system.get('Type', system.get('System Type', 'System')),
+                'Title': system.get('Title', system.get('Name', sys_id)),
+                'Condition Index': system.get('Condition Index', 65),
+                'Age (years)': system.get('Age (years)', 20),
+                'Life Expectancy': system.get('Life Expectancy', 50),
+                'total_failures': total_failures,
+                'first_failure_date': first_failure,
+                'last_failure_date': last_failure,
+                'most_common_failure': most_common,
+                'days_between_failures': days_between
+            }
+            
+            # Add other system columns
+            for col in system.index:
+                if col not in system_row and col not in ['_inferred_facility', '_grouped_facility']:
+                    system_row[col] = system[col]
+            
+            system_rows.append(system_row)
         
-        # Handle condition_delta
-        if 'Condition Index' in master.columns:
-            master['condition_delta'] = 100 - master['Condition Index']
-        else:
-            master['condition_delta'] = 35  # Default if condition index missing
+        # Combine facility and system rows
+        master = pd.DataFrame(facility_rows + system_rows)
         
-        # Handle risk_score calculation
-        age_col = master.get('Age (years)', pd.Series([20] * len(master))) if 'Age (years)' not in master.columns else master['Age (years)']
-        life_expectancy_col = master.get('Life Expectancy', pd.Series([50] * len(master))) if 'Life Expectancy' not in master.columns else master['Life Expectancy']
+        # Calculate derived features for all rows
+        master['failure_rate'] = master['total_failures'] / master['Age (years)'].clip(lower=1)
+        master['condition_delta'] = 100 - master['Condition Index']
         
+        age_col = master['Age (years)']
+        life_expectancy_col = master['Life Expectancy']
         master['risk_score'] = (
             master['failure_rate'] * 0.3 +
             master['condition_delta'] * 0.4 +
@@ -442,8 +656,11 @@ class FacilityDataETL:
         # Target variable: Probability of failure within 12 months
         master['failure_within_12mo'] = (
             (master['total_failures'] > 0) & 
-            ((datetime.now() - master['last_failure_date']).dt.days < 365)
+            (pd.notna(master['last_failure_date'])) &
+            ((datetime.now() - pd.to_datetime(master['last_failure_date'])).dt.days < 365)
         ).astype(int)
+        
+        print(f"  Created {len(facility_rows)} facility rows and {len(system_rows)} system rows")
         
         return master
     

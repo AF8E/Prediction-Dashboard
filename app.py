@@ -210,69 +210,220 @@ def prepare_features_for_prediction(df):
     return X_scaled, all_features
 
 
-def predict_failure_dates(df):
+def predict_failure_dates(filepath_or_df):
     """
-    Predict failure dates and costs for facilities
+    Predict failure dates and costs for systems, then aggregate to facilities
     
     Args:
-        df: Facility dataframe
+        filepath_or_df: File path (str) or DataFrame
         
     Returns:
-        DataFrame with predictions
+        Dictionary with hierarchical structure: {'facilities': [...]}
     """
-    # Prepare features
-    X, features = prepare_features_for_prediction(df)
+    # Load data - handle both file path and DataFrame
+    if isinstance(filepath_or_df, str):
+        if filepath_or_df.endswith('.csv'):
+            df = pd.read_csv(filepath_or_df)
+            # For CSV, assume it's already the system data
+            systems_df = df
+            facility_df = pd.DataFrame()  # Empty, will infer from systems
+        else:
+            # Excel file - load both sheets
+            try:
+                facility_df = pd.read_excel(filepath_or_df, sheet_name='Facility Condition Index')
+            except:
+                facility_df = pd.DataFrame()
+            
+            try:
+                systems_df = pd.read_excel(filepath_or_df, sheet_name='System Condition Index')
+            except:
+                # Fallback: use first sheet as systems
+                systems_df = pd.read_excel(filepath_or_df, sheet_name=0)
+    else:
+        # DataFrame provided
+        systems_df = filepath_or_df
+        facility_df = pd.DataFrame()
     
-    # Predict condition index
-    predicted_condition = regression_model.predict(X)
+    # Group systems by facility
+    # Identify facility ID column in systems
+    facility_id_col = None
+    for col in ['Facility Number', 'Facility ID', 'Parent Facility', 'Facility', 'facility_id']:
+        if col in systems_df.columns:
+            facility_id_col = col
+            break
     
-    # Predict failure probability
-    failure_probability = classification_model.predict_proba(X)[:, 1]
+    # If no facility column, try to infer from system ID
+    if facility_id_col is None:
+        system_id_col = None
+        for col in ['Unique Identifier', 'System ID', 'ID', 'entity_id']:
+            if col in systems_df.columns:
+                system_id_col = col
+                break
+        
+        if system_id_col:
+            # Heuristic: extract facility from system ID
+            def extract_facility(system_id):
+                if pd.isna(system_id):
+                    return None
+                import re
+                match = re.search(r'Facility\s*#?(\d+)', str(system_id), re.IGNORECASE)
+                if match:
+                    return f"FAC-{int(match.group(1)):03d}"
+                match = re.search(r'(\d+)', str(system_id))
+                if match:
+                    sys_num = int(match.group(1))
+                    facility_num = ((sys_num - 1) // 15) + 1
+                    return f"FAC-{facility_num:03d}"
+                return None
+            
+            systems_df['facility_id'] = systems_df[system_id_col].apply(extract_facility)
+            facility_id_col = 'facility_id'
+        else:
+            # Default grouping
+            systems_per_facility = 15
+            systems_df['facility_id'] = (systems_df.index // systems_per_facility).apply(
+                lambda x: f"FAC-{x+1:03d}"
+            )
+            facility_id_col = 'facility_id'
     
-    # Calculate predicted failure date
-    current_age = df.get('Age (years)', 20)
-    life_expectancy = df.get('Life Expectancy', 50)
-    current_condition = df.get('Condition Index', predicted_condition)
+    # Get system ID column
+    system_id_col = None
+    for col in ['Unique Identifier', 'System ID', 'ID', 'entity_id']:
+        if col in systems_df.columns:
+            system_id_col = col
+            break
     
-    # Estimate years until failure based on degradation rate
-    degradation_rate = (100 - predicted_condition) / current_age.clip(lower=1)
-    years_until_critical = (predicted_condition - 25) / degradation_rate.clip(lower=0.1)
+    if system_id_col is None:
+        systems_df['entity_id'] = systems_df.index.map(lambda x: f"SYS-{x+1:03d}")
+        system_id_col = 'entity_id'
     
-    # Adjust based on failure probability
-    years_until_failure = years_until_critical * (1 - failure_probability * 0.5)
+    # Prepare features for each system and predict
+    system_predictions = []
     
-    predicted_failure_date = pd.to_datetime('today') + pd.to_timedelta(years_until_failure * 365, unit='D')
+    for idx, system in systems_df.iterrows():
+        # Create single-row DataFrame for prediction
+        system_df = pd.DataFrame([system])
+        
+        # Prepare features
+        X, features = prepare_features_for_prediction(system_df)
+        
+        # Predict condition index
+        predicted_condition = regression_model.predict(X)[0]
+        
+        # Predict failure probability
+        failure_probability = classification_model.predict_proba(X)[0, 1]
+        
+        # Calculate predicted failure date
+        current_age = system.get('Age (years)', 20)
+        life_expectancy = system.get('Life Expectancy', 50)
+        current_condition = system.get('Condition Index', predicted_condition)
+        
+        # Estimate years until failure
+        degradation_rate = (100 - predicted_condition) / max(current_age, 1)
+        years_until_critical = (predicted_condition - 25) / max(degradation_rate, 0.1)
+        years_until_failure = years_until_critical * (1 - failure_probability * 0.5)
+        
+        predicted_failure_date = pd.to_datetime('today') + pd.to_timedelta(years_until_failure * 365, unit='D')
+        
+        # Estimate cost
+        base_replacement_cost = {
+            'Foundation': 500000,
+            'Basement': 300000,
+            'Superstructure': 400000,
+            'Roofing': 150000,
+            'HVAC': 200000,
+            'Electric': 180000,
+            'Plumbing': 120000,
+            'Fire Protection': 100000
+        }
+        
+        system_type = system.get('Type', system.get('System Type', 'Unknown'))
+        estimated_cost = base_replacement_cost.get(system_type, 250000) * (1 + (100 - predicted_condition) / 100)
+        
+        # Determine risk level
+        risk_prob = failure_probability * 100
+        if risk_prob >= 60:
+            risk_level = 'High'
+        elif risk_prob >= 30:
+            risk_level = 'Medium'
+        else:
+            risk_level = 'Low'
+        
+        system_predictions.append({
+            'system_id': system.get(system_id_col, f"SYS-{idx+1:03d}"),
+            'system_type': system_type,
+            'facility_id': system.get(facility_id_col, f"FAC-{(idx // 15) + 1:03d}"),
+            'system_condition': float(current_condition),
+            'predicted_condition': float(predicted_condition),
+            'failure_probability': float(risk_prob),
+            'failure_date': predicted_failure_date.strftime('%Y-%m-%d'),
+            'cost': float(estimated_cost),
+            'risk': risk_level
+        })
     
-    # Estimate cost (simplified model)
-    base_replacement_cost = {
-        'Foundation': 500000,
-        'Basement': 300000,
-        'Superstructure': 400000,
-        'Roofing': 150000,
-        'HVAC': 200000,
-        'Electric': 180000,
-        'Plumbing': 120000
-    }
+    # Group systems by facility and aggregate
+    facilities_dict = {}
     
-    facility_type = df.get('Type', 'Unknown')
-    estimated_cost = facility_type.apply(
-        lambda x: base_replacement_cost.get(x, 250000) * (1 + (100 - predicted_condition) / 100)
-    )
+    for sys_pred in system_predictions:
+        fac_id = sys_pred['facility_id']
+        
+        if fac_id not in facilities_dict:
+            # Get facility info if available
+            fac_info = {}
+            if len(facility_df) > 0 and 'facility_id' in facility_df.columns:
+                fac_row = facility_df[facility_df['facility_id'] == fac_id]
+                if len(fac_row) > 0:
+                    fac_info = fac_row.iloc[0].to_dict()
+            
+            facilities_dict[fac_id] = {
+                'facility_id': fac_id,
+                'facility_name': fac_info.get('Title', fac_info.get('Name', fac_id)),
+                'systems': []
+            }
+        
+        facilities_dict[fac_id]['systems'].append(sys_pred)
     
-    # Create results dataframe
-    results = df.copy()
-    results['Predicted_Condition_Index'] = predicted_condition
-    results['Failure_Probability'] = (failure_probability * 100).round(1)
-    results['Predicted_Failure_Date'] = predicted_failure_date
-    results['Years_Until_Failure'] = years_until_failure.round(1)
-    results['Estimated_Replacement_Cost'] = estimated_cost.round(0)
-    results['Risk_Level'] = pd.cut(
-        failure_probability * 100,
-        bins=[0, 30, 60, 100],
-        labels=['Low', 'Medium', 'High']
-    )
+    # Aggregate facility-level metrics
+    facilities_list = []
     
-    return results
+    for fac_id, facility_data in facilities_dict.items():
+        systems = facility_data['systems']
+        
+        # Weighted average condition (by life expectancy - use system types as proxy)
+        system_conditions = [s['system_condition'] for s in systems]
+        facility_condition = sum(system_conditions) / len(system_conditions) if system_conditions else 65
+        
+        # Max failure probability (facility fails when worst system fails)
+        facility_failure_probability = max([s['failure_probability'] for s in systems]) if systems else 0
+        
+        # Min failure date (facility fails when first system fails)
+        failure_dates = [pd.to_datetime(s['failure_date']) for s in systems]
+        facility_failure_date = min(failure_dates).strftime('%Y-%m-%d') if failure_dates else None
+        
+        # Sum of costs
+        facility_cost = sum([s['cost'] for s in systems])
+        
+        # Risk level: High if ANY system is High, Medium if ANY is Medium
+        system_risks = [s['risk'] for s in systems]
+        if 'High' in system_risks:
+            facility_risk = 'High'
+        elif 'Medium' in system_risks:
+            facility_risk = 'Medium'
+        else:
+            facility_risk = 'Low'
+        
+        facilities_list.append({
+            'facility_id': fac_id,
+            'facility_name': facility_data['facility_name'],
+            'facility_condition': round(facility_condition, 1),
+            'facility_failure_probability': round(facility_failure_probability, 1),
+            'facility_failure_date': facility_failure_date,
+            'facility_cost': round(facility_cost, 0),
+            'facility_risk': facility_risk,
+            'systems': systems
+        })
+    
+    return {'facilities': facilities_list}
 
 
 @app.route('/')
@@ -340,40 +491,31 @@ def predict():
         return redirect(url_for('upload'))
     
     try:
-        # Load uploaded file
-        if filename.endswith('.csv'):
-            df = pd.read_csv(filepath)
-        elif filename.endswith(('.xlsx', '.xls')):
-            df = pd.read_excel(filepath)
-        else:
-            flash('Unsupported file format', 'error')
-            return redirect(url_for('upload'))
+        # Make predictions (function handles file loading)
+        hierarchical_results = predict_failure_dates(filepath)
+        facilities = hierarchical_results['facilities']
         
-        # Make predictions
-        results = predict_failure_dates(df)
-        
-        # Convert to dict for template
-        results_dict = results.to_dict('records')
-        
-        # Summary statistics
+        # Calculate summary statistics from facilities
         summary = {
-            'total_facilities': len(results),
-            'high_risk': len(results[results['Risk_Level'] == 'High']),
-            'medium_risk': len(results[results['Risk_Level'] == 'Medium']),
-            'low_risk': len(results[results['Risk_Level'] == 'Low']),
-            'avg_failure_probability': results['Failure_Probability'].mean(),
-            'total_estimated_cost': results['Estimated_Replacement_Cost'].sum()
+            'total_facilities': len(facilities),
+            'high_risk': sum(1 for f in facilities if f['facility_risk'] == 'High'),
+            'medium_risk': sum(1 for f in facilities if f['facility_risk'] == 'Medium'),
+            'low_risk': sum(1 for f in facilities if f['facility_risk'] == 'Low'),
+            'avg_failure_probability': sum(f['facility_failure_probability'] for f in facilities) / len(facilities) if facilities else 0,
+            'total_estimated_cost': sum(f['facility_cost'] for f in facilities)
         }
         
         return render_template(
             'results.html',
-            results=results_dict,
+            results=hierarchical_results,  # Pass full hierarchical structure
             summary=summary,
             filename=filename
         )
         
     except Exception as e:
+        import traceback
         flash(f'Error processing file: {str(e)}', 'error')
+        print(f"Error details: {traceback.format_exc()}")
         return redirect(url_for('upload'))
 
 

@@ -41,10 +41,19 @@ class FacilityMLPipeline:
         self.feature_importance = {}
         
     def load_data(self):
-        """Load master training data"""
+        """Load master training data and filter for system-level predictions"""
         print("Loading master training data...")
         self.data = pd.read_csv(self.data_path)
-        print(f"  Loaded {len(self.data)} records with {len(self.data.columns)} features")
+        print(f"  Loaded {len(self.data)} total records with {len(self.data.columns)} features")
+        
+        # Filter to system-level data for training (we predict at system level)
+        if 'level' in self.data.columns:
+            system_data = self.data[self.data['level'] == 'system'].copy()
+            print(f"  Filtered to {len(system_data)} system-level records for training")
+            self.data = system_data
+        else:
+            print("  WARNING: No 'level' column found. Using all data for training.")
+        
         return self.data
     
     def prepare_features(self):
@@ -229,17 +238,28 @@ class FacilityMLPipeline:
         
         # Check class balance
         class_counts = y.value_counts()
+        unique_classes = len(class_counts)
         print(f"\nClass distribution:")
         print(f"  No failure (0): {class_counts.get(0, 0)}")
         print(f"  Failure (1): {class_counts.get(1, 0)}")
         
-        # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42, stratify=y
-        )
+        # Split data - only use stratify if we have multiple classes
+        if unique_classes > 1:
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, random_state=42, stratify=y
+            )
+        else:
+            print("  WARNING: Only one class present. Cannot use stratified split.")
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, random_state=42
+            )
         
-        # Handle class imbalance
-        class_weight = 'balanced' if class_counts.min() / class_counts.max() < 0.3 else None
+        # Handle class imbalance - only if we have multiple classes
+        if unique_classes > 1:
+            class_weight = 'balanced' if class_counts.min() / class_counts.max() < 0.3 else None
+        else:
+            class_weight = None
+            print("  WARNING: Only one class present. Model will predict this class for all samples.")
         
         # Define model
         param_grid = {
@@ -255,32 +275,62 @@ class FacilityMLPipeline:
             class_weight=class_weight
         )
         
-        print("\nPerforming hyperparameter search...")
-        grid_search = GridSearchCV(
-            rf_classifier,
-            param_grid,
-            cv=5,
-            scoring='f1',
-            n_jobs=-1,
-            verbose=0
-        )
-        
-        grid_search.fit(X_train, y_train)
-        
-        print(f"Best parameters: {grid_search.best_params_}")
-        
-        # Get best model
-        self.classification_model = grid_search.best_estimator_
+        # Only do grid search if we have multiple classes, otherwise just fit
+        if unique_classes > 1:
+            print("\nPerforming hyperparameter search...")
+            grid_search = GridSearchCV(
+                rf_classifier,
+                param_grid,
+                cv=5,
+                scoring='f1',
+                n_jobs=-1,
+                verbose=0
+            )
+            
+            grid_search.fit(X_train, y_train)
+            print(f"Best parameters: {grid_search.best_params_}")
+            self.classification_model = grid_search.best_estimator_
+        else:
+            print("\nSkipping hyperparameter search (only one class). Fitting model directly...")
+            rf_classifier.fit(X_train, y_train)
+            self.classification_model = rf_classifier
+            print("Model fitted successfully.")
         
         # Evaluate
         y_pred_test = self.classification_model.predict(X_test)
-        y_pred_proba = self.classification_model.predict_proba(X_test)[:, 1]
+        
+        # Handle case where model only has one class (all zeros or all ones)
+        try:
+            y_pred_proba = self.classification_model.predict_proba(X_test)
+            # Check if we have 2 classes
+            if y_pred_proba.shape[1] == 2:
+                y_pred_proba = y_pred_proba[:, 1]
+            else:
+                # Only one class - if it's class 0, probability of failure is 0
+                # If it's class 1, probability of failure is 1
+                if len(y_train.unique()) == 1 and y_train.iloc[0] == 0:
+                    y_pred_proba = np.zeros(len(X_test))
+                elif len(y_train.unique()) == 1 and y_train.iloc[0] == 1:
+                    y_pred_proba = np.ones(len(X_test))
+                else:
+                    y_pred_proba = y_pred_proba[:, 0]
+        except Exception as e:
+            # Fallback if predict_proba fails
+            print(f"  Warning: predict_proba failed ({e}). Using default probabilities.")
+            if len(y_train.unique()) == 1 and y_train.iloc[0] == 0:
+                y_pred_proba = np.zeros(len(X_test))
+            else:
+                y_pred_proba = np.ones(len(X_test))
         
         print("\nClassification Report:")
-        print(classification_report(y_test, y_pred_test, target_names=['No Failure', 'Failure']))
-        
-        print("\nConfusion Matrix:")
-        print(confusion_matrix(y_test, y_pred_test))
+        if len(np.unique(y_test)) > 1:
+            print(classification_report(y_test, y_pred_test, target_names=['No Failure', 'Failure']))
+            print("\nConfusion Matrix:")
+            print(confusion_matrix(y_test, y_pred_test))
+        else:
+            print(f"  All samples belong to class: {y_test.iloc[0] if len(y_test) > 0 else 'N/A'}")
+            print("  Note: Cannot generate classification report with single class.")
+            print("  Model will predict this class for all new samples.")
         
         # Feature importance
         feature_importance = pd.DataFrame({
